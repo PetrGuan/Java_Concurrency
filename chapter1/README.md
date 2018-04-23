@@ -86,3 +86,177 @@ The property of executing multiple threads and processes at the same time is ref
 > * Java 本身不支持多继承，所以 implementing Runnable 更灵活。
 > * Implementing Runnable 更面向对象，因为这样做分离了要做的 task 以及执行这个 task 的 Thread 对象。
 > * Implementing Runnable 便于 Concurrency API 来使用。
+
+## Polling with Sleep
+
+poll 的意思在字典里是 process of voting in an election，也就是说在选举时候的投票过程。在这里 polling 的意思是在固定的时间区间内不时地去查看数据的过程。举个简单的例子，现在你有一个线程来修改一个 shared static counter 变量，并且你的 main() thread 正在等待这个值增加到100。
+
+    public class CheckResults {
+      private static int counter = 0;
+      public static void main(String[] args) {
+        new Thread(() -> {
+          for (int i = 0; i < 500; ++i)
+            CheckResults.counter++;
+        }).start();
+        while (checkResults.counter < 100)
+          System.out.println("Not reached yet");
+
+        System.out.println("Reached!");
+      }
+    }
+
+这个 while() 循环以及 “Not reached yet” 会输出多少次呢？正确的答案是我们不知道！可以是0次，10次，甚至100万次。为什么会这样呢？回想我们前面提到的 **thread scheduler**，如果我们的 scheduler 很差，这段程序可能永远不会结束！
+
+我们可以使用 Thread.sleep() 来实现 polling。这个方法可以使正在执行的线程休息一段时间。
+
+    public class CheckResults {
+      private static int counter = 0;
+      public static void main(String[] args) throws InterruptedException {
+        new Thread(() -> {
+          for (int i = 0; i < 500; ++i)
+            CheckResults.counter++;
+        }).start();
+
+        while (CheckResults.counter < 100) {
+          System.out.println("Not reached yet");
+          Thread.sleep(1000); // 1 second
+        }
+
+        System.out.println("Reached!");
+      }
+    }
+
+Polling 可以防止 CPU 被无限循环所淹没，但它不保证这个循环什么时候会结束。
+
+## Single-Thread Executor
+
+Java 提供 ExecutorService ，例子如下：
+
+
+    import java.util.concurrent.ExecutorService;
+    import java.util.concurrent.Executors;
+    public class ZooInfo {
+    public static void main(String[] args) {
+        ExecutorService service = null;
+        try {
+            service = Executors.newSingleThreadExecutor();
+
+            System.out.println("begin");
+            service.execute(() -> System.out.println("Printing zoo inventory1"));
+            service.execute(() -> {
+                for (int i = 0; i < 3; ++i)
+                    System.out.println("Printing record: " + i);
+            });
+            service.execute(() -> System.out.println("Printing zoo inventory2"));
+            System.out.println("end");
+        } finally {
+            if (service != null) service.shutdown();
+        }
+    }
+}
+
+    begin
+    Printing zoo inventory1
+    Printing record: 0
+    Printing record: 1
+    end
+    Printing record: 2
+    Printing zoo inventory2
+
+
+对于 single-thread executor 来说，可以保证结果的顺序是进入 executor service 的顺序。注意这里“end”已经输出了而我们的 thread executor tasks 还在执行。这是因为 main() 是一个独立的线程相比�于 ExecutorService，main() 线程也可以在其他线程运行的时候执行任务。
+
+## Shutting Down a Thread Executor
+
+记得要使用 shutdown() 方法在你完成了任务以后，为什么呢？ thread executor 在第一个 task 执行的时候会创建一个 non-daemon thread，所以如果你没有使用 shutdown 方法的话你的应用将永远不结束。
+
+shutdown 的过程如下：
+
+> * 首先拒绝任何新的提交到 thread executor 的 task，此时调用 isShutdown() 会返回 true，isTerminated() 会返回 false。如果有新的 task 提交， 会抛出 RejectedExecutionException。
+> * 当所有 active tasks 都完成以后，isShutdown() 以及 isTerminated() 都会返回 true。
+
+![executorService-life-cycle](./img/p2.png)
+
+## Submitting Tasks
+
+有许多种方式可以提交 task 给 ExecutorService instance，之前我们见到的就是 execute()方法。这个方法返回的类型是 void，也就是说这是一个 “fire-and-forget” 方法，执行结果并不能直接被 calling thread 得到。具体的方法见下图：
+
+![ExecutorService-methods](./img/p3.png)
+
+## Waiting for Results
+
+我们如何知道提交给 ExecutorService 的 task 已经完成了呢？前图的 submit() 方法会返回 Future object，
+
+    Future<?> future = service.submit(() -> System.out.println("Hello Zoo"));
+
+![Future-methods](./img/p4.png)
+
+    import java.util.concurrent.*;
+
+    public class CheckResults {
+      private static int counter = 0;
+      public static void main(String[] args) throws       InterruptedException, ExecutionException{
+        ExecutorService service = null;
+        try {
+            service = Executors.newSingleThreadExecutor();
+            Future<?> result = service.submit(() -> {
+                for (int i = 0; i < 500; ++i)
+                    CheckResults.counter++;
+            });
+            result.get(10, TimeUnit.SECONDS);
+            System.out.println("Reached!");
+        } catch (TimeoutException e) {
+            System.out.println("Not reached in time");
+        } finally {
+            if (service != null) service.shutdown();
+        }
+    }
+    }
+
+## Introducing Callable
+
+    @FunctionalInterface public interface Callable<V> {
+      V call() throws Exception;
+    }
+
+    import java.util.concurrent.*;
+
+    public class AddData {
+      public static void main(String[] args) throws InterruptedException, ExecutionException {
+        ExecutorService service = null;
+        try {
+          service = Executors.newSingleThreadExecutor();
+          Future<Integer> result = service.submit(() -> 30+11);
+          System.out.println(result.get());
+        } finally {
+          if (service != null) service.shutdown();
+        }
+      }
+    }
+
+## Waiting for All Tasks to Finish
+
+    ExecutorService service = null;
+    try {
+      service = Executors.newSingleThreadExecutor();
+      // Add tasks to the thread executor
+      ...
+    } finally {
+      if (service != null) service.shutdown();
+    }
+    if (service != null) {
+      service.awaitTermination(1, TimeUnit.MINUTES);
+      // Check whether all tasks are finished
+      if (service.isTerminated())
+        System.out.println("All tasks finished");
+      else
+        System.out.println("At least one task is still running");
+    }
+
+## Scheduling Tasks
+
+有时候我们需要 schedule 一些 task，比如定时地执行某个任务。 ScheduledExecutorService 继承自 ExecutorService。
+
+    ScheduledExecutorService service = Executors.newSingleThreadScheduledExecutor();
+
+![ScheduledExecutorService-methods](./img/p5.png)
