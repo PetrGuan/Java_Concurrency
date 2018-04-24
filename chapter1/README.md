@@ -260,3 +260,160 @@ shutdown 的过程如下：
     ScheduledExecutorService service = Executors.newSingleThreadScheduledExecutor();
 
 ![ScheduledExecutorService-methods](./img/p5.png)
+
+
+## Increasing Concurrency with Pools
+
+线程池(thread pool)，是一系列之前实例化过的可以重复使用的线程，工厂模式如下图：
+
+![Executors-methods](./img/p6.png)
+
+单线程(single-thread)以及池中的线程(pooled-thread)的区别在于以下，当有一个线程在执行 task 的时候，single-thread executor 在执行下一个 task 之前会等待一个可用线程，而 pooled-thread executor 可以使用池中可用线程同时执行这下一个 task。如果池内的可用线程都用完了， task 会加入队列来等待。
+
+newCachedThreadPool() 方法会创造一个 unbounded size 的线程池，可用随时 allocating a new thread。适用场景如下，执行许多 short-lived 异步 task。对于 long-lived task 不该使用这种方式。
+
+## Choosing a Pool Size
+
+线程池的大小有时候依赖于 CPU 数目
+
+    Runtime.getRuntime().availableProcessors()
+
+## Synchronizing Data Access
+
+举例说明，现在我们的动物园需要数有多少只羊，我们有很多工人来完成这个任务，代码如下：
+
+```java
+    import java.util.concurrent.ExecutorService;
+    import java.util.concurrent.Executors;
+
+    public class SheepManager {
+       private int sheepCount = 0;
+       private void incrementAndReport() {
+        System.out.print((++sheepCount)+ " ");
+       }
+
+       public static void main(String []args) {
+        ExecutorService service = null;
+        try {
+            service = Executors.newFixedThreadPool(20);
+            SheepManager manager = new SheepManager();
+            for (int i = 0; i < 10; ++i)
+                service.submit(() -> manager.incrementAndReport());
+        } finally {
+            if (service != null) service.shutdown();
+        }
+    }}
+```
+
+单看自增语句的等价语句：
+
+    sheepCount = sheepCount + 1
+
+如果有两个线程都在执行该语句的右边部分，读取的都是写操作还没完成前的值，那么这两次赋值会 redundant，也就是有一次更新“消失”了。如下图所示：
+
+![Lack-of-thread-synchronization](./img/p7.png)
+
+一个可能的输出结果就是：
+
+    1 2 2 3 4 5 6 7 8 9
+
+## Protecting Data with Atomic Classes
+
+之前例子的 increment operator ++ 操作不是线程安全的，更具体一点的话，也就是这个操作不是原子性的（atomic），其实这个操作可用分为**读**和**写**。
+
+原子性指的是这样一种属性，不被其他线程干扰的、能单独单位地执行。
+*the property of an operation to be carried out as a single unit of execution without any interference by another thread。*
+
+以我们的例子而言就是把读和写操作“绑”在一起，如下图：
+
+![thread-synchronization-with-atomic-operations](./img/p8.png)
+
+Concurrency API 提供了一系列类支持原子操作，如下图：
+
+![atomic-classes](./img/p8.png)
+
+代码如下图：
+
+    AtomicInteger:
+
+    private AtomicInteger sheepCount = new AtomicInteger(0);
+    private void incrementAndReport() {
+      System.out.println(sheepCount.incrementAndGet() + " ");
+    }
+
+## Improving Access with Synchronized Blocks
+
+如何让之前的结果顺序输出？一种最常见的技术是使用 monitor，也叫作 lock 来同步访问。monitor 是一种结构，它支持互相排斥，或者说最多只有一个线程在某段时间内执行特定的代码块。
+
+*A monitor is a structure that supports mutual exclusion or the property that at most one thread is executing a particular segment of code at a given time*
+
+Java 中任何 Object 都能被用作 monitor，比如以下：
+
+    SheepManager manager = new SheedManager();
+    synchronized(manager) {
+     // work to be completed by one thread at a time
+    }
+
+这被称为 synchronized block。每个执行到这里的线程会首先检查是否有其他线程进入了这个代码块，或者说取得了这个锁（acquires the lock）。如果锁没有被别的线程占有，那么线程取得这个锁并且阻止其他线程进入。
+
+正确的实现：
+
+```java
+    import java.util.concurrent.ExecutorService;
+    import java.util.concurrent.Executors;
+
+    public class SheepManager {
+    private int sheepCount = 0;
+    private void incrementAndReport() {
+        synchronized (this) {
+            System.out.print((++sheepCount) + " ");
+        }
+    }
+
+    public static void main(String []args) {
+        ExecutorService service = null;
+        try {
+            service = Executors.newFixedThreadPool(20);
+            SheepManager manager = new SheepManager();
+            for (int i = 0; i < 10; ++i)
+                service.submit(() -> manager.incrementAndReport());
+        } finally {
+            if (service != null) service.shutdown();
+        }
+    }
+    }
+```
+
+## Synchronizing Methods
+
+之前的例子我们通过 synchronized（this） 来建立 monitor，Java 提供了一种更好的方法，就是同步方法，以下两种定义等价：
+
+    private void incrementAndReport() {
+      synchronized(this) {
+        System.out.print((++sheepCount)+ " ");
+      }
+    }
+
+    private synchronized void incrementAndReport() {
+      System.out.print((++sheepCount)+ " ");
+    }
+
+我们也可以对静态方法（static）添加同步修饰符，此时 class Object 本身就被作为 monitor，见以下例子：
+
+    public static void printDaysWork() {
+      synchronized(SheepManager.class) {
+        System.out.print("Finished work");
+      }
+    }
+
+    public static synchronized void printDaysWork() {
+      System.out.print("Finished work");
+    }
+
+## Understanding the Cost of Synchronization
+
+举例来说，假设我们有一个高并发的类，有50个线程会读取同一个 object，平均每个线程需要100毫秒来执行这个操作。如果所有线程同时 access monitor，一共需要多久完成？假设这50个线程都在线程池内并且可以使用。
+
+    50 threads * 100 ms
+    = 5,000 ms
+    = 5 s
